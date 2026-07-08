@@ -1,0 +1,8 @@
+This is a placeholder file for the TFCL Highlander item whitelist.
+
+The correct whitelist is automatically included in release builds and managed by the TFCL updater plugin.
+
+If you have this file, please follow the install instructions at:
+https://github.com/tfcleague/server-resources-updater
+
+The whitelist is served from the TFCL GitHub repository's updater branch.
