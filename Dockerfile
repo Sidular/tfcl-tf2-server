@@ -2,18 +2,19 @@
 #
 # Layers the TFCL-branded match/scrim configs, whitelist fallbacks, UGC league
 # configs, the ETF2L Fours Passtime whitelist addition, the TFCL SourceMod
-# plugin bundle (QoL tweaks + self-updater), and the maps.tfcleague.com
+# plugin bundle (QoL tweaks + self-updater), a boot-time TF2/SourceMod update
+# check (see tfcl-entrypoint.sh below), and the maps.tfcleague.com
 # map-download-source override on top of the upstream melkortf/tf2-competitive
 # image (which already bakes in RGL.gg + ETF2L configs, TFTrue, demos.tf/logs.tf
 # uploaders, mapdownloader, and everything else documented in
 # https://github.com/melkortf/tf2-servers).
 #
 # This image is pulled fresh on every on-demand Vultr server boot (see
-# webapp's src/lib/vultr-relay.ts), so the base image's built-in `-autoupdate`
-# steamcmd flag (baked into its entrypoint.sh) re-validates/updates the TF2
-# install on every container start - this is what gives us "auto-update at
-# boot" for free, without any extra logic in this Dockerfile or the boot
-# script.
+# webapp's src/lib/vultr-relay.ts). NOTE: contrary to this repo's original
+# assumption, the base image's `-autoupdate` srcds flag does NOT actually
+# perform a steamcmd update on modern SteamPipe installs - see
+# tfcl-entrypoint.sh's comment for the full explanation and citation. The
+# ENTRYPOINT override below is what actually gives us "auto-update at boot".
 FROM ghcr.io/melkortf/tf2-competitive:latest
 
 # --- TFCL / UGC / ETF2L format configs + whitelist fallbacks --------------
@@ -51,3 +52,23 @@ RUN cat /home/tf2/sourcemod-override.cfg >> /home/tf2/server/tf/cfg/sourcemod/so
 USER root
 RUN chown -R tf2:tf2 /home/tf2/server/tf/cfg /home/tf2/server/tf/addons/sourcemod/plugins
 USER tf2
+
+# --- Boot-time TF2/SourceMod auto-update ------------------------------------
+# Wraps the base image's entrypoint.sh with a real steamcmd update check run
+# on every container start (the base image's `-autoupdate` srcds flag alone
+# does NOT do this on modern SteamPipe installs - see tfcl-entrypoint.sh for
+# the full explanation). install_tf2.sh (steamcmd + retries) and the
+# HOME/SERVER_DIR env vars it needs are already present in the base image.
+COPY --chown=tf2:tf2 --chmod=755 tfcl-entrypoint.sh /home/tf2/tfcl-entrypoint.sh
+ENTRYPOINT ["/home/tf2/tfcl-entrypoint.sh"]
+CMD ["+sv_pure", "1", "+map", "cp_badlands", "+maxplayers", "24"]
+
+# Widen the base image's HEALTHCHECK start-period (20s) - a real steamcmd
+# update can take well over 20s if Valve has actually shipped a new TF2
+# build (vs. the near-instant no-op re-validate on the common case where
+# nothing changed), so the tighter base-image grace period would otherwise
+# flap the container to "unhealthy" during a real update download. This is
+# purely cosmetic for `docker ps`/`docker inspect` - nothing in vultr-relay.ts
+# or the webapp's RCON-based readiness polling depends on Docker health
+# status, so this doesn't change actual boot/readiness behavior.
+HEALTHCHECK --interval=30s --timeout=30s --start-period=5m --retries=3 CMD [ "./healthcheck.sh" ]

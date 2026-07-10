@@ -21,11 +21,11 @@ script that just runs `docker pull` + `docker run` against this image.
   end-to-end, vs. the old snapshot's documented 5-30 minute disk-clone
   restore - a 4-20x speedup, confirmed via live testing across three
   separate Vultr instances/locations.
-- **Auto-update**: the base `melkortf/tf2-competitive` image's `entrypoint.sh`
-  runs steamcmd with `-autoupdate` on every container start, so pulling
-  `:latest` and starting a fresh container gets the current TF2/SourceMod
-  build for free - no custom update logic needed, unlike the snapshot
-  approach where the disk image itself could silently drift out of date.
+- **Auto-update**: unlike the old snapshot approach (where the disk image
+  itself could silently drift out of date with no update path at all short
+  of re-baking the whole snapshot), every container boot now runs an actual
+  steamcmd `app_update` check before launching srcds - see "Auto-update at
+  boot" below for exactly how and why.
 
 ## What's layered on top of the base image
 
@@ -50,6 +50,40 @@ script that just runs `docker pull` + `docker run` against this image.
   the `mapdownloader` plugin fetches any non-baked map (which is almost all
   of them - the base image only ships `cp_badlands` + a few `mge_*` maps
   locally) from TFCL's own map mirror.
+- **`tfcl-entrypoint.sh`** - overrides the base image's `ENTRYPOINT` to run a
+  real steamcmd update check before every launch. See "Auto-update at boot"
+  below for why this is necessary.
+
+## Auto-update at boot
+
+**This is not handled by the base image alone.** The base
+`melkortf/tf2-competitive` image launches srcds with a `-autoupdate` flag,
+but that flag is a legacy pre-SteamPipe srcds option that does **not**
+actually perform a steamcmd validate/update on modern installs - it's a
+no-op left over from the old WON/pre-2013 update mechanism (confirmed via
+community reports, e.g.
+[this AlliedModders thread](https://forums.alliedmods.net/showthread.php?t=340369):
+"the only thing the game does with the `-autoupdate` launch option is shut
+off the server the next time hibernation starts... it doesn't actually
+update anything itself"). The base image's *actual* TF2 install only ever
+gets refreshed by its own `install_tf2.sh` script (`steamcmd
++login anonymous +app_update ${APP_ID}`), and that only runs **once**, at
+Docker image *build* time (baked into `amd64.Dockerfile`/`i386.Dockerfile`) -
+never again at container boot.
+
+Without anything extra, that means pulling `:latest` and starting a fresh
+container gets you whatever TF2/SourceMod build was current the last time
+this image was rebuilt (CI rebuilds on push to `main`, weekly cron, and
+manual dispatch - see `.github/workflows/build-push.yml`), which can silently
+drift up to a week stale between rebuilds - not the current Steam build.
+
+**Fix**: `tfcl-entrypoint.sh` overrides the base image's `ENTRYPOINT` and
+re-runs that exact same `install_tf2.sh` steamcmd step on every container
+start, before handing off to the base image's own `entrypoint.sh`. This is a
+fast no-op re-validate in the common case (nothing changed since the image
+was built) and a real download in the case where Valve has shipped an update
+since then - giving genuine "auto-update at boot," which the `-autoupdate`
+flag alone never provided.
 
 ## Boot-time configuration
 
@@ -87,6 +121,8 @@ docker run -d --name tfcl-test --network host \
 
 `.github/workflows/build-push.yml` builds and pushes to
 `ghcr.io/sidular/tfcl-tf2-server:latest` on every push to `main`, on a weekly
-schedule (to pick up upstream base-image changes), and on manual dispatch.
-Day-to-day TF2/SourceMod updates don't require a rebuild at all - they're
-picked up automatically at container boot via `-autoupdate`.
+schedule (to pick up upstream base-image/plugin changes), and on manual
+dispatch. Day-to-day TF2/SourceMod updates don't require a rebuild at all -
+they're picked up automatically at container boot via `tfcl-entrypoint.sh`
+(see "Auto-update at boot" above) - **not** via the base image's
+`-autoupdate` flag, which doesn't actually do this.
