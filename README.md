@@ -1,19 +1,37 @@
 # tfcl-tf2-server
 
 Custom TF2 Competitive server image for TFCL (TF2 Competitive League)'s
-on-demand Vultr PUG/tournament servers.
+Vultr-hosted PUG/tournament/match servers.
 
 ## What this is
 
 `FROM ghcr.io/melkortf/tf2-competitive:latest`, with TFCL's branded
-configs/whitelists, SourceMod plugin bundle, and map-download-source override
-layered on top. Published to `ghcr.io/sidular/tfcl-tf2-server`.
+configs/whitelists, a SourceMod plugin bundle, and a map-download-source
+override layered on top. Published to `ghcr.io/sidular/tfcl-tf2-server` as
+**two tags built from the same Dockerfile**:
+
+| Tag | Used by | Plugin bundle |
+| --- | --- | --- |
+| `:latest` | play.tfcleague.com's self-service on-demand `/servers` page | `tfclqol.smx` + `tfclupdater.smx` + `updater.smx` |
+| `:match-server` | play.tfcleague.com's TFCL Prime match-booking API (`/api/match-servers`) - replaces serveme.tf for these bookings | same three, **plus** `tfcl_matchserver.smx` (ESEA-style ready-up/warmup/live + match-end reporting) |
+
+Both tags share 100% of the same `cfg/`, whitelists, map-download override,
+and boot-time update entrypoint - the ONLY difference is which plugin bundle
+directory gets baked in (`plugins/` vs `plugins-match-server/`, selected via
+the `PLUGIN_DIR` build arg - see the Dockerfile's header comment and
+`.github/workflows/build-push.yml`, which builds both tags on every push).
+`tfcl_matchserver.smx`'s full ConVar contract and source
+(`tfcl_matchserver.sp`) live in play.tfcleague.com's own repo under
+`sourcemod-plugin/` - this repo only carries the **compiled** `.smx`, kept in
+sync by hand whenever that source changes (see "Updating the plugin bundle"
+below).
 
 This replaces TFCL's old workflow of provisioning on-demand Vultr servers
 from a 50GB pre-baked disk snapshot (see the webapp's `src/lib/vultr-relay.ts`
-and `VULTR_SNAPSHOT_ID`). Instead, on-demand servers now boot from a stock
-Vultr "Docker on Ubuntu" marketplace image via a small cloud-init `user_data`
-script that just runs `docker pull` + `docker run` against this image.
+and `VULTR_SNAPSHOT_ID`). Instead, servers now boot from a stock Vultr
+"Docker on Ubuntu" marketplace image via a small cloud-init `user_data`
+script that just runs `docker pull` + `docker run` against the appropriate
+tag for the booking type.
 
 ### Why
 
@@ -34,7 +52,8 @@ script that just runs `docker pull` + `docker run` against this image.
   UGC league configs + whitelists, and the ETF2L Fours Passtime whitelist
   addition. (RGL.gg and the rest of the ETF2L set are already baked into the
   base image - not duplicated here.)
-- **`plugins/`** - the TFCL SourceMod plugin bundle:
+- **`plugins/`** - the `:latest` (on-demand `/servers`) SourceMod plugin
+  bundle:
   - `tfclqol.smx` - QoL tweaks, compiled from `tfclqol.sp` source.
   - `tfclupdater.smx` - self-updater that syncs cfg/whitelist changes from
     [Sidular/server-resources-updater](https://github.com/Sidular/server-resources-updater)
@@ -44,6 +63,18 @@ script that just runs `docker pull` + `docker run` against this image.
     `tfclupdater.smx` depends on. **Not shipped by the base image** (which
     only ships the `updater.ext.so` extension + its include) - compiled from
     source here to fill that gap.
+- **`plugins-match-server/`** - the `:match-server` (TFCL Prime bookings)
+  SourceMod plugin bundle: the SAME `tfclqol.smx` + `tfclupdater.smx` +
+  `updater.smx` as `plugins/`, plus `tfcl_matchserver.smx` - ESEA-style
+  `.ready`/`.unready`/`.notready`, roster/subs handling, a configurable
+  "lo3" (live-on-three) warmup restart sequence, a "MATCH LIVE" center-text
+  display, match-end detection, and a 1-hour no-show timeout with staged
+  chat warnings. Source (`tfcl_matchserver.sp`) and the full ConVar
+  contract this plugin expects from the Worker live in
+  play.tfcleague.com's own repo under `sourcemod-plugin/` - see that repo's
+  `sourcemod-plugin/README.md` for the complete build/integration/testing
+  writeup. This directory only carries the compiled `.smx` (see "Updating
+  the plugin bundle" below for how to re-sync it).
 - **`sourcemod-overrides/sourcemod.cfg`** - appended onto the base image's
   existing `sourcemod.cfg` to override `sm_map_download_base` from the
   upstream default (`fastdl.serveme.tf`) to `https://maps.tfcleague.com`, so
@@ -104,10 +135,36 @@ own `envsubst`-based templating - no custom scripting needed on top:
 Default idle state matches the previous snapshot setup: hostname
 `TFCL Server`, default map `cp_process_f12`, `sv_pure 1`, `maxplayers 24`.
 
+## Updating the plugin bundle
+
+Both `plugins/` and `plugins-match-server/` carry **compiled** `.smx`
+files only - there's no SourcePawn source or `spcomp` build step in this
+repo. To pick up a plugin change:
+
+1. Compile the updated `.sp` -> `.smx` in its source-of-truth repo:
+   - `tfclqol.sp` / `tfclupdater.sp` - `Sidular/TFCL-Server-Config`.
+   - `tfcl_matchserver.sp` (and `tfcl_reservation.sp`, once that one is
+     wired in here too) - play.tfcleague.com's own repo, under
+     `sourcemod-plugin/` (see that directory's README.md for the exact
+     `spcomp` invocation and include paths).
+2. Copy the resulting `.smx` into **both** `plugins/` and
+   `plugins-match-server/` if it's one of the three shared files
+   (`tfclqol.smx`/`tfclupdater.smx`/`updater.smx`), or into
+   **`plugins-match-server/` only** if it's `tfcl_matchserver.smx` (this
+   file must never be copied into `plugins/` - the two bundles are
+   deliberately not identical).
+3. Commit + push to `main` - CI rebuilds and republishes both tags
+   automatically (see "CI" below).
+
 ## Building locally
 
 ```bash
+# :latest (on-demand /servers) - PLUGIN_DIR defaults to plugins/, no build-arg needed:
 docker build -t tfcl-tf2-server:test .
+
+# :match-server (TFCL Prime bookings) - pass PLUGIN_DIR explicitly:
+docker build --build-arg PLUGIN_DIR=plugins-match-server -t tfcl-tf2-server:test-match .
+
 docker run -d --name tfcl-test --network host \
   -e SERVER_HOSTNAME="TFCL Server" \
   -e RCON_PASSWORD=changeme \
@@ -119,10 +176,15 @@ docker run -d --name tfcl-test --network host \
 
 ## CI
 
-`.github/workflows/build-push.yml` builds and pushes to
-`ghcr.io/sidular/tfcl-tf2-server:latest` on every push to `main`, on a weekly
-schedule (to pick up upstream base-image/plugin changes), and on manual
-dispatch. Day-to-day TF2/SourceMod updates don't require a rebuild at all -
-they're picked up automatically at container boot via `tfcl-entrypoint.sh`
-(see "Auto-update at boot" above) - **not** via the base image's
-`-autoupdate` flag, which doesn't actually do this.
+`.github/workflows/build-push.yml` runs the build TWICE on every push to
+`main`, on a weekly schedule (to pick up upstream base-image/plugin
+changes), and on manual dispatch - once with the default `PLUGIN_DIR`
+(publishing `ghcr.io/sidular/tfcl-tf2-server:latest` +
+`:${{ github.sha }}`), and once with `PLUGIN_DIR=plugins-match-server`
+(publishing `:match-server` + `:match-server-${{ github.sha }}`). Both
+runs share the same `cfg/`/whitelists/entrypoint - only the plugin bundle
+COPY differs (see the Dockerfile's header comment). Day-to-day
+TF2/SourceMod updates don't require a rebuild at all for either tag -
+they're picked up automatically at container boot via
+`tfcl-entrypoint.sh` (see "Auto-update at boot" above) - **not** via the
+base image's `-autoupdate` flag, which doesn't actually do this.
