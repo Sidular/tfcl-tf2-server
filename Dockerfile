@@ -71,12 +71,37 @@ COPY sourcemod-overrides/sourcemod.cfg /home/tf2/sourcemod-override.cfg
 RUN cat /home/tf2/sourcemod-override.cfg >> /home/tf2/server/tf/cfg/sourcemod/sourcemod.cfg && \
     rm /home/tf2/sourcemod-override.cfg
 
+# --- Chat trigger fix (2026-07-26): enable ".ready" as a real chat command -
+# Bug found live: TFCL Prime reported ".ready isn't working" on a freshly
+# booked match server. Root cause has NOTHING to do with config_preset/RGL
+# vs any other format cfg (confirmed no "esea" preset exists anywhere in
+# Play's rcon.ts, and "ESEA-style" in this codebase only ever describes the
+# ready-up/warmup BEHAVIOR, not a distinct preset id) - it's that the base
+# melkortf/tf2-competitive image ships SourceMod's stock
+# addons/sourcemod/configs/core.cfg, whose PublicChatTrigger is only "!"
+# (SilentChatTrigger "/") - "." was NEVER a registered chat-trigger
+# character. tfcl_matchserver.sp's ready-up commands are registered via
+# RegConsoleCmd("sm_ready"/"ready"/"sm_unready"/"unready"/"sm_notready"/
+# "notready", ...) in OnPluginStart(), and SourceMod auto-generates chat
+# triggers from those ONLY using the character(s) in PublicChatTrigger/
+# SilentChatTrigger - so "!ready" and "/ready" always silently worked,
+# but ".ready" (the exact syntax this plugin's own in-game broadcasts and
+# docs tell players to use - see the no-show warning message and the
+# plugin's header comment) never did anything at all, on EVERY match
+# server regardless of preset. This is unlike the sourcemod.cfg override
+# above: core.cfg is read once at SourceMod startup (not re-exec'd per map
+# change), and any key *omitted* from this override file falls back to
+# SourceMod's own coded default (documented in the base file's own header
+# comment) - so a full-replace containing only the two keys below is safe,
+# no risk of stomping other core settings.
+COPY sourcemod-overrides/core.cfg /home/tf2/server/tf/addons/sourcemod/configs/core.cfg
+
 # Ownership: the base image's plugin/cfg files are chowned to the "tf2" user
 # (see melkortf/tf2-servers tf2-competitive/Dockerfile's `COPY --chown=tf2`);
 # match that here so file perms are consistent for anything the server or
 # its plugins write back to these paths at runtime.
 USER root
-RUN chown -R tf2:tf2 /home/tf2/server/tf/cfg /home/tf2/server/tf/addons/sourcemod/plugins
+RUN chown -R tf2:tf2 /home/tf2/server/tf/cfg /home/tf2/server/tf/addons/sourcemod/plugins /home/tf2/server/tf/addons/sourcemod/configs/core.cfg
 USER tf2
 
 # --- Boot-time TF2/SourceMod auto-update ------------------------------------
